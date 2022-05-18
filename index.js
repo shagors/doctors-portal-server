@@ -5,8 +5,9 @@ require('dotenv').config();
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 const app = express();
 const port = process.env.PORT || 5000;
-var nodemailer = require('nodemailer');
-var sgTransport = require('nodemailer-sendgrid-transport');
+const nodemailer = require('nodemailer');
+const sgTransport = require('nodemailer-sendgrid-transport');
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
 app.use(cors());
 app.use(express.json());
@@ -42,21 +43,51 @@ const emailClient = nodemailer.createTransport(sgTransport(emailSenderOptions));
 function sendAppointmentEmail(booking){
     const {patient, patientName, treatment, date, slot} = booking;
 
-    const email = {
-        from: process.env.EMAIL_SENDER,
-        to: patient,
-        subject: `Your Appointment for ${treatment} is on ${date} at ${slot} is confirm`,
-        text: `Your Appointment for ${treatment} is on ${date} at ${slot} is confirm`,
-        html: `
-            <div>
-                <p>Hello ${patientName}</p>
-                <h3>Your Appointment for ${treatment}</h3>
-                <p>Looking forward to seeing you on ${date} at ${slot}</p>
-                <h1>Our Address</h1>
-                <p>Rangpur, Bangladesh</p>
-            </div>
-        `
-    };
+var email = {
+    from: process.env.EMAIL_SENDER,
+    to: patient,
+    subject: `Your Appointment for ${treatment} is on ${date} at ${slot} is confirm`,
+    text: `Your Appointment for ${treatment} is on ${date} at ${slot} is confirm`,
+    html: `
+        <div>
+            <p>Hello ${patientName}</p>
+            <h3>Your Appointment for ${treatment}</h3>
+            <p>Looking forward to seeing you on ${date} at ${slot}</p>
+            <h1>Our Address</h1>
+            <p>Rangpur, Bangladesh</p>
+        </div>
+    `
+};
+
+    emailClient.sendMail(email, function(err, info){
+        if(err){
+            console.log(err);
+        }
+        else{
+            console.log('Message sent' , info);
+        }
+    });
+}
+
+
+function sendPaymentConfirmationEmail(booking){
+    const {patient, patientName, treatment, date, slot} = booking;
+
+var email = {
+    from: process.env.EMAIL_SENDER,
+    to: patient,
+    subject: `We have received your payment for ${treatment} is on ${date} at ${slot} is confirm`,
+    text: `Your Payment for this Appointment ${treatment} is on ${date} at ${slot} is confirm`,
+    html: `
+        <div>
+            <p>Hello ${patientName}</p>
+            <h3>Thank you for your payment</h3>
+            <p>Looking forward to seeing you on ${date} at ${slot}</p>
+            <h1>Our Address</h1>
+            <p>Rangpur, Bangladesh</p>
+        </div>
+    `
+};
 
     emailClient.sendMail(email, function(err, info){
         if(err){
@@ -75,6 +106,7 @@ async function run(){
         const bookingCollection = client.db('doctors_portal').collection('bookings');
         const userCollection = client.db('doctors_portal').collection('user');
         const doctorCollection = client.db('doctors_portal').collection('doctors');
+        const paymentCollection = client.db('doctors_portal').collection('payments');
 
         const verifyAdmin = async(req, res, next) => {
             const requester = req.decoded.email;
@@ -92,6 +124,19 @@ async function run(){
             const cursor = serviceCollection.find(query).project({name: 1});
             const services = await cursor.toArray();
             res.send(services);
+        });
+
+        // payment System
+        app.post('/create-payment-intent', verifyJWT, async(req, res) => {
+            const service = req.body;
+            const price = service.price;
+            const amount = price*100;
+            const paymentIntent = await stripe.paymentIntents.create({
+                amount: amount,
+                currency: 'usd',
+                payment_method_types:['card']
+            });
+            res.send({clientSecret: paymentIntent.client_secret});
         });
 
         app.get('/user', verifyJWT, async (req, res) => {
@@ -193,6 +238,22 @@ async function run(){
             const result = await bookingCollection.insertOne(booking);
             sendAppointmentEmail(booking);
             res.send({success: true, result});
+        });
+
+        // payment id check and verify
+        app.patch('/booking/:id', verifyJWT, async(req, res) => {
+            const id = req.params.id;
+            const payment = req.body;
+            const filter = {_id: ObjectId(id)};
+            const updatedDoc = {
+                $set: {
+                    paid: true,
+                    transactionId: payment.transactionId
+                }
+            }
+            const result = await paymentCollection.insertOne(payment);
+            const updatedBooking = await bookingCollection.updateOne(filter, updatedDoc);
+            res.send(updatedBooking);
         });
 
         app.get('/doctor', verifyJWT, verifyAdmin, async(req, res) => {
